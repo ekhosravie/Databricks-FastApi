@@ -1,0 +1,144 @@
+from typing import List, Optional
+from fastapi import FastAPI, HTTPException, Query
+from pydantic import BaseModel
+from pyspark.sql import functions as F
+from fastapi.testclient import TestClient
+import pandas as pd
+from IPython.display import display, Markdown
+
+app = FastAPI(title="NYC Taxi FastAPI API")
+
+TABLE_NAME = "samples.nyctaxi.trips"
+
+# -----------------------------
+# Pydantic Models
+# -----------------------------
+class Trip(BaseModel):
+    tpep_pickup_datetime: str
+    tpep_dropoff_datetime: str
+    trip_distance: float
+    fare_amount: float
+    pickup_zip: int
+    dropoff_zip: int
+
+# -----------------------------
+# API Routes
+# -----------------------------
+
+@app.get("/trips")
+def list_trips(
+    min_fare: Optional[float] = Query(None),
+    pickup_zip: Optional[int] = Query(None),
+    limit: int = Query(10)
+):
+    
+    df = spark.table(TABLE_NAME)
+
+    if min_fare is not None:
+        df = df.filter(F.col("fare_amount") >= min_fare)
+
+    if pickup_zip is not None:
+        df = df.filter(F.col("pickup_zip") == pickup_zip)
+
+    result = (
+        df.limit(limit)
+          .toPandas()
+          .to_dict(orient="records")
+    )
+
+    return result
+
+
+@app.get("/trips/stats")
+def trip_stats():
+
+    df = spark.table(TABLE_NAME)
+
+    stats = (
+        df.agg(
+            F.count("*").alias("total_trips"),
+            F.avg("fare_amount").alias("avg_fare"),
+            F.avg("trip_distance").alias("avg_distance"),
+            F.max("fare_amount").alias("max_fare")
+        )
+        .toPandas()
+        .iloc[0]
+        .to_dict()
+    )
+
+    return stats
+
+
+@app.get("/trips/by-pickup/{pickup_zip}")
+def trips_by_pickup(pickup_zip: int, limit: int = 10):
+
+    df = (
+        spark.table(TABLE_NAME)
+        .filter(F.col("pickup_zip") == pickup_zip)
+        .limit(limit)
+    )
+
+    return df.toPandas().to_dict(orient="records")
+
+
+@app.get("/trips/top-zips")
+def top_pickup_zips(limit: int = 10):
+
+    df = (
+        spark.table(TABLE_NAME)
+        .groupBy("pickup_zip")
+        .count()
+        .orderBy(F.desc("count"))
+        .limit(limit)
+    )
+
+    return df.toPandas().to_dict(orient="records")
+
+
+# -----------------------------
+# TEST CLIENT
+# -----------------------------
+
+client = TestClient(app)
+
+# -----------------------------
+# DISPLAY HELPERS
+# -----------------------------
+
+def show_df(data, title="Results"):
+    if not data:
+        display(Markdown(f"## {title}\nNo rows"))
+        return
+
+    df = pd.DataFrame(data)
+
+    display(Markdown(f"## {title}"))
+    display(df)
+
+# -----------------------------
+# TEST: LIST TRIPS
+# -----------------------------
+
+r = client.get(
+    "/trips",
+    params={
+        "min_fare": 20,
+        "pickup_zip": 10001,
+        "limit": 5
+    }
+)
+
+show_df(r.json(), "Trips")
+
+# -----------------------------
+# TEST: STATS
+# -----------------------------
+
+r = client.get("/trips/stats")
+
+show_df([r.json()], "Statistics")
+# -----------------------------
+# TEST: TOP ZIPS
+# -----------------------------
+r = client.get("/trips/top-zips")
+show_df(r.json(), "Top Pickup ZIPs")
